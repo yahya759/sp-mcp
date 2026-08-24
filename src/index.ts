@@ -122,103 +122,113 @@ async function handleAuthorizeGet(url: URL): Promise<Response> {
 }
 
 async function handleAuthorizePost(request: Request, env: Env): Promise<Response> {
-  const form = await request.formData();
-  const email = String(form.get("email") ?? "");
-  const password = String(form.get("password") ?? "");
-  const clientId = String(form.get("client_id") ?? "");
-  const redirectUri = String(form.get("redirect_uri") ?? "");
-  const state = String(form.get("state") ?? "");
-  const codeChallenge = String(form.get("code_challenge") ?? "");
+  try {
+    const form = await request.formData();
+    const email = String(form.get("email") ?? "");
+    const password = String(form.get("password") ?? "");
+    const clientId = String(form.get("client_id") ?? "");
+    const redirectUri = String(form.get("redirect_uri") ?? "");
+    const state = String(form.get("state") ?? "");
+    const codeChallenge = String(form.get("code_challenge") ?? "");
 
-  // تسجيل الدخول عبر Supabase Auth
-  const authRes = await fetch(`${env.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
-    method: "POST",
-    headers: { apikey: env.SUPABASE_ANON_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
-  });
+    // تسجيل الدخول عبر Supabase Auth
+    const authRes = await fetch(`${env.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+      method: "POST",
+      headers: { apikey: env.SUPABASE_ANON_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
 
-  if (!authRes.ok) {
-    return html(`<p style="font-family:sans-serif;text-align:center;margin-top:60px;color:#dc2626">
-      بيانات الدخول غلط. <a href="javascript:history.back()">ارجع وحاول مرة تانية</a></p>`, 401);
+    if (!authRes.ok) {
+      return html(`<p style="font-family:sans-serif;text-align:center;margin-top:60px;color:#dc2626">
+        بيانات الدخول غلط. <a href="javascript:history.back()">ارجع وحاول مرة تانية</a></p>`, 401);
+    }
+
+    const authData: any = await authRes.json();
+    const userId = authData.user?.id;
+    if (!userId) return html("<p>خطأ غير متوقع بتسجيل الدخول</p>", 500);
+
+    if (!redirectUri) return html("<p>redirect_uri مفقود بالطلب</p>", 400);
+
+    // أنشئ authorization code واحفظه
+    const code = randomToken(24);
+    await sbInsert(env, "sp_mcp_auth_codes", {
+      code,
+      user_id: userId,
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      code_challenge: codeChallenge,
+    });
+
+    const redirect = new URL(redirectUri);
+    redirect.searchParams.set("code", code);
+    if (state) redirect.searchParams.set("state", state);
+
+    return Response.redirect(redirect.toString(), 302);
+  } catch (err: any) {
+    return html(`<p style="font-family:sans-serif;text-align:center;margin-top:60px;color:#dc2626">صار خطأ: ${String(err?.message ?? err)}</p>`, 500);
   }
-
-  const authData: any = await authRes.json();
-  const userId = authData.user?.id;
-  if (!userId) return html("<p>خطأ غير متوقع</p>", 500);
-
-  // أنشئ authorization code واحفظه
-  const code = randomToken(24);
-  await sbInsert(env, "sp_mcp_auth_codes", {
-    code,
-    user_id: userId,
-    client_id: clientId,
-    redirect_uri: redirectUri,
-    code_challenge: codeChallenge,
-  });
-
-  const redirect = new URL(redirectUri);
-  redirect.searchParams.set("code", code);
-  if (state) redirect.searchParams.set("state", state);
-
-  return Response.redirect(redirect.toString(), 302);
 }
 
 // ---------- OAuth: /token ----------
 
 async function handleToken(request: Request, env: Env): Promise<Response> {
-  const contentType = request.headers.get("content-type") || "";
-  let params: URLSearchParams;
-  if (contentType.includes("application/json")) {
-    const body: any = await request.json();
-    params = new URLSearchParams(body);
-  } else {
-    params = new URLSearchParams(await request.text());
-  }
-
-  const grantType = params.get("grant_type");
-  if (grantType !== "authorization_code") {
-    return json({ error: "unsupported_grant_type" }, 400);
-  }
-
-  const code = params.get("code") ?? "";
-  const codeVerifier = params.get("code_verifier") ?? "";
-
-  const rows: any[] = await sbSelect(
-    env,
-    "sp_mcp_auth_codes",
-    `code=eq.${encodeURIComponent(code)}&used=eq.false&select=*`
-  );
-  const authCode = rows[0];
-  if (!authCode) return json({ error: "invalid_grant" }, 400);
-  if (new Date(authCode.expires_at).getTime() < Date.now()) {
-    return json({ error: "invalid_grant", error_description: "code expired" }, 400);
-  }
-
-  if (authCode.code_challenge) {
-    const computed = await sha256Base64Url(codeVerifier);
-    if (computed !== authCode.code_challenge) {
-      return json({ error: "invalid_grant", error_description: "PKCE mismatch" }, 400);
+  try {
+    const contentType = request.headers.get("content-type") || "";
+    let params: URLSearchParams;
+    if (contentType.includes("application/json")) {
+      const body: any = await request.json();
+      params = new URLSearchParams(body);
+    } else {
+      params = new URLSearchParams(await request.text());
     }
+
+    const grantType = params.get("grant_type");
+    if (grantType !== "authorization_code") {
+      return json({ error: "unsupported_grant_type" }, 400);
+    }
+
+    const code = params.get("code") ?? "";
+    const codeVerifier = params.get("code_verifier") ?? "";
+
+    const rows: any[] = await sbSelect(
+      env,
+      "sp_mcp_auth_codes",
+      `code=eq.${encodeURIComponent(code)}&used=eq.false&select=*`
+    );
+    const authCode = rows[0];
+    if (!authCode) return json({ error: "invalid_grant" }, 400);
+    if (new Date(authCode.expires_at).getTime() < Date.now()) {
+      return json({ error: "invalid_grant", error_description: "code expired" }, 400);
+    }
+
+    if (authCode.code_challenge) {
+      const computed = await sha256Base64Url(codeVerifier);
+      if (computed !== authCode.code_challenge) {
+        return json({ error: "invalid_grant", error_description: "PKCE mismatch" }, 400);
+      }
+    }
+
+    await sbUpdate(env, "sp_mcp_auth_codes", `code=eq.${encodeURIComponent(code)}`, { used: true });
+
+    const accessToken = randomToken(32);
+    const refreshToken = randomToken(32);
+    await sbInsert(env, "sp_mcp_tokens", {
+      user_id: authCode.user_id,
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      client_id: authCode.client_id,
+      expires_at: new Date(Date.now() + 1000 * 60 * 60 * 24 * 90).toISOString(), // 90 يوم
+    });
+
+    return json({
+      access_token: accessToken,
+      token_type: "Bearer",
+      expires_in: 60 * 60 * 24 * 90,
+      refresh_token: refreshToken,
+    });
+  } catch (err: any) {
+    return json({ error: "server_error", error_description: String(err?.message ?? err) }, 500);
   }
-
-  await sbUpdate(env, "sp_mcp_auth_codes", `code=eq.${encodeURIComponent(code)}`, { used: true });
-
-  const accessToken = randomToken(32);
-  const refreshToken = randomToken(32);
-  await sbInsert(env, "sp_mcp_tokens", {
-    user_id: authCode.user_id,
-    access_token: accessToken,
-    refresh_token: refreshToken,
-    client_id: authCode.client_id,
-    expires_at: new Date(Date.now() + 1000 * 60 * 60 * 24 * 90).toISOString(), // 90 يوم
-  });
-
-  return json({
-    access_token: accessToken,
-    token_type: "Bearer",
-    expires_in: 60 * 60 * 24 * 90,
-    refresh_token: refreshToken,
-  });
 }
 
 // ---------- OAuth: Dynamic Client Registration (اختياري لكن Claude بيتوقعه) ----------
@@ -318,6 +328,54 @@ async function publishInstagramPost(
 
 // ---------- MCP JSON-RPC endpoint ----------
 
+async function getRecentPosts(env: Env, userId: string, accountId?: string) {
+  const accounts: any[] = await getInstagramAccounts(env, userId);
+  if (accounts.length === 0) throw new Error("ما في حساب إنستقرام مربوط بحسابك.");
+  const account = accountId ? accounts.find((a) => a.id === accountId) : accounts[0];
+  if (!account) throw new Error("الحساب المطلوب مش موجود");
+
+  const res = await fetch(
+    `https://graph.instagram.com/v21.0/${account.ig_user_id}/media?fields=id,caption,media_type,media_url,permalink,timestamp&limit=15&access_token=${account.access_token}`
+  );
+  const data: any = await res.json();
+  if (!res.ok) throw new Error(`فشل جلب المنشورات: ${data?.error?.message ?? "خطأ غير معروف"}`);
+  return { account, posts: data.data ?? [] };
+}
+
+async function getPostComments(env: Env, userId: string, postId: string, accountId?: string) {
+  const accounts: any[] = await getInstagramAccounts(env, userId);
+  const account = accountId ? accounts.find((a) => a.id === accountId) : accounts[0];
+  if (!account) throw new Error("الحساب المطلوب مش موجود");
+
+  const res = await fetch(
+    `https://graph.instagram.com/v21.0/${postId}/comments?fields=id,text,username,timestamp&access_token=${account.access_token}`
+  );
+  const data: any = await res.json();
+  if (!res.ok) throw new Error(`فشل جلب التعليقات: ${data?.error?.message ?? "خطأ غير معروف"}`);
+  return { account, comments: data.data ?? [] };
+}
+
+async function replyToComment(
+  env: Env,
+  userId: string,
+  commentId: string,
+  message: string,
+  accountId?: string
+) {
+  const accounts: any[] = await getInstagramAccounts(env, userId);
+  const account = accountId ? accounts.find((a) => a.id === accountId) : accounts[0];
+  if (!account) throw new Error("الحساب المطلوب مش موجود");
+
+  const res = await fetch(`https://graph.instagram.com/v21.0/${commentId}/replies`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, access_token: account.access_token }),
+  });
+  const data: any = await res.json();
+  if (!res.ok) throw new Error(`فشل إرسال الرد: ${data?.error?.message ?? "خطأ غير معروف"}`);
+  return { reply_id: data.id, account: account.ig_username };
+}
+
 const TOOLS = [
   {
     name: "list_connected_accounts",
@@ -337,21 +395,60 @@ const TOOLS = [
       required: ["caption", "image_url"],
     },
   },
+  {
+    name: "list_recent_posts",
+    description: "يرجع آخر منشورات حساب إنستقرام المربوط (id, caption, رابط) عشان المستخدم يختار وحدة يشتغل عليها",
+    inputSchema: {
+      type: "object",
+      properties: {
+        account_id: { type: "string", description: "معرف الحساب (اختياري لو عنده حساب واحد بس)" },
+      },
+    },
+  },
+  {
+    name: "get_post_comments",
+    description: "يرجع تعليقات منشور معين (id, نص التعليق, اسم صاحبه) عشان تصير تكتب ردود عليها",
+    inputSchema: {
+      type: "object",
+      properties: {
+        post_id: { type: "string", description: "معرف المنشور (من list_recent_posts)" },
+        account_id: { type: "string", description: "معرف الحساب (اختياري)" },
+      },
+      required: ["post_id"],
+    },
+  },
+  {
+    name: "reply_to_comment",
+    description: "يرسل رد فعلي على تعليق محدد بمنشور إنستقرام (بعد ما تصيغ الرد بالمحادثة مع المستخدم)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        comment_id: { type: "string", description: "معرف التعليق (من get_post_comments)" },
+        message: { type: "string", description: "نص الرد المطلوب إرساله" },
+        account_id: { type: "string", description: "معرف الحساب (اختياري)" },
+      },
+      required: ["comment_id", "message"],
+    },
+  },
 ];
 
 async function handleMcp(request: Request, env: Env): Promise<Response> {
-  const userId = await getUserIdFromBearer(request, env);
-  if (!userId) {
-    return json(
-      { jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id: null },
-      401
-    );
+  let body: any;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: null }, 400);
   }
 
-  const body: any = await request.json();
   const { id, method, params } = body;
 
   try {
+    // ملاحظة: تحقق الهوية داخل نفس try/catch عشان أي خطأ شبكة/قاعدة بيانات يرجع رد نضيف بدل ما يكسر الـ Worker
+    const userId = await getUserIdFromBearer(request, env);
+    if (!userId) {
+      return json({ jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id }, 401);
+    }
+
     if (method === "initialize") {
       return json({
         jsonrpc: "2.0",
@@ -359,7 +456,7 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
         result: {
           protocolVersion: "2025-06-18",
           capabilities: { tools: {} },
-          serverInfo: { name: "sp-mcp", version: "0.1.0" },
+          serverInfo: { name: "sp-mcp", version: "0.2.0" },
         },
       });
     }
@@ -377,11 +474,7 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
         const text = accounts.length
           ? accounts.map((a: any) => `- @${a.ig_username} (id: ${a.id})`).join("\n")
           : "ما في حسابات مربوطة حالياً.";
-        return json({
-          jsonrpc: "2.0",
-          id,
-          result: { content: [{ type: "text", text }] },
-        });
+        return json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text }] } });
       }
 
       if (toolName === "publish_instagram_post") {
@@ -397,20 +490,55 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
           id,
           result: {
             content: [
-              {
-                type: "text",
-                text: `تم النشر بنجاح على @${result.account} ✅ (post_id: ${result.post_id})`,
-              },
+              { type: "text", text: `تم النشر بنجاح على @${result.account} ✅ (post_id: ${result.post_id})` },
             ],
           },
         });
       }
 
-      return json({
-        jsonrpc: "2.0",
-        id,
-        error: { code: -32601, message: `Unknown tool: ${toolName}` },
-      });
+      if (toolName === "list_recent_posts") {
+        const { account, posts } = await getRecentPosts(env, userId, args.account_id);
+        const text = posts.length
+          ? posts
+              .map(
+                (p: any) =>
+                  `- id: ${p.id} | ${p.caption ? p.caption.slice(0, 60) : "(بدون كابشن)"} | ${p.permalink}`
+              )
+              .join("\n")
+          : "ما في منشورات بهاد الحساب.";
+        return json({
+          jsonrpc: "2.0",
+          id,
+          result: { content: [{ type: "text", text: `منشورات @${account.ig_username}:\n${text}` }] },
+        });
+      }
+
+      if (toolName === "get_post_comments") {
+        const { comments } = await getPostComments(env, userId, args.post_id, args.account_id);
+        const text = comments.length
+          ? comments.map((c: any) => `- id: ${c.id} | @${c.username}: ${c.text}`).join("\n")
+          : "ما في تعليقات على هاد المنشور.";
+        return json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text }] } });
+      }
+
+      if (toolName === "reply_to_comment") {
+        const result = await replyToComment(
+          env,
+          userId,
+          args.comment_id,
+          args.message,
+          args.account_id
+        );
+        return json({
+          jsonrpc: "2.0",
+          id,
+          result: {
+            content: [{ type: "text", text: `تم إرسال الرد ✅ (reply_id: ${result.reply_id})` }],
+          },
+        });
+      }
+
+      return json({ jsonrpc: "2.0", id, error: { code: -32601, message: `Unknown tool: ${toolName}` } });
     }
 
     return json({ jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } });
@@ -427,53 +555,57 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
+    try {
+      const url = new URL(request.url);
 
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: CORS_HEADERS });
-    }
+      if (request.method === "OPTIONS") {
+        return new Response(null, { headers: CORS_HEADERS });
+      }
 
-    // OAuth discovery metadata (MCP clients بتدور عليها تلقائياً)
-    if (url.pathname === "/.well-known/oauth-authorization-server") {
-      return json({
-        issuer: env.MCP_BASE_URL,
-        authorization_endpoint: `${env.MCP_BASE_URL}/authorize`,
-        token_endpoint: `${env.MCP_BASE_URL}/token`,
-        registration_endpoint: `${env.MCP_BASE_URL}/register`,
-        response_types_supported: ["code"],
-        grant_types_supported: ["authorization_code", "refresh_token"],
-        code_challenge_methods_supported: ["S256"],
-        token_endpoint_auth_methods_supported: ["none"],
-      });
-    }
+      // OAuth discovery metadata (MCP clients بتدور عليها تلقائياً)
+      if (url.pathname === "/.well-known/oauth-authorization-server") {
+        return json({
+          issuer: env.MCP_BASE_URL,
+          authorization_endpoint: `${env.MCP_BASE_URL}/authorize`,
+          token_endpoint: `${env.MCP_BASE_URL}/token`,
+          registration_endpoint: `${env.MCP_BASE_URL}/register`,
+          response_types_supported: ["code"],
+          grant_types_supported: ["authorization_code", "refresh_token"],
+          code_challenge_methods_supported: ["S256"],
+          token_endpoint_auth_methods_supported: ["none"],
+        });
+      }
 
-    if (url.pathname === "/.well-known/oauth-protected-resource") {
-      return json({
-        resource: env.MCP_BASE_URL,
-        authorization_servers: [env.MCP_BASE_URL],
-      });
-    }
+      if (url.pathname === "/.well-known/oauth-protected-resource") {
+        return json({
+          resource: env.MCP_BASE_URL,
+          authorization_servers: [env.MCP_BASE_URL],
+        });
+      }
 
-    if (url.pathname === "/authorize" && request.method === "GET") {
-      return handleAuthorizeGet(url);
-    }
-    if (url.pathname === "/authorize" && request.method === "POST") {
-      return handleAuthorizePost(request, env);
-    }
-    if (url.pathname === "/token" && request.method === "POST") {
-      return handleToken(request, env);
-    }
-    if (url.pathname === "/register" && request.method === "POST") {
-      return handleRegister(request);
-    }
-    if (url.pathname === "/mcp" && request.method === "POST") {
-      return handleMcp(request, env);
-    }
+      if (url.pathname === "/authorize" && request.method === "GET") {
+        return handleAuthorizeGet(url);
+      }
+      if (url.pathname === "/authorize" && request.method === "POST") {
+        return handleAuthorizePost(request, env);
+      }
+      if (url.pathname === "/token" && request.method === "POST") {
+        return handleToken(request, env);
+      }
+      if (url.pathname === "/register" && request.method === "POST") {
+        return handleRegister(request);
+      }
+      if (url.pathname === "/mcp" && request.method === "POST") {
+        return handleMcp(request, env);
+      }
 
-    if (url.pathname === "/" || url.pathname === "/health") {
-      return json({ status: "ok", service: "sp-mcp" });
-    }
+      if (url.pathname === "/" || url.pathname === "/health") {
+        return json({ status: "ok", service: "sp-mcp" });
+      }
 
-    return json({ error: "not_found" }, 404);
+      return json({ error: "not_found" }, 404);
+    } catch (err: any) {
+      return json({ error: "internal_error", message: String(err?.message ?? err) }, 500);
+    }
   },
 };
