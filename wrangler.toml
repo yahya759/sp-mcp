@@ -1,0 +1,14 @@
+name = "sp-mcp"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+# لازم تضيف هاي كـ secrets من CLI (ما تحطها هون بالنص):
+# wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+# wrangler secret put IG_APP_ID
+# wrangler secret put IG_APP_SECRET
+#
+# وهاي متغيرات عادية (غير سرية) تقدر تحطها هون أو بالـ dashboard:
+[vars]
+SUPABASE_URL = "https://xkrropuokjvfugibwyvo.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhrcnJvcHVva2p2ZnVnaWJ3eXZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0ODIzNjksImV4cCI6MjA5NDA1ODM2OX0.A6IKqynQNANG__bRO9tUiBCWxvmF3GuFPoiYky8ANL0"
+MCP_BASE_URL = "https://sp-mcp.<your-subdomain>.workers.dev"

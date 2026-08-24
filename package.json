@@ -1,0 +1,16 @@
+{
+  "name": "sp-mcp",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "secret:supabase": "wrangler secret put SUPABASE_SERVICE_ROLE_KEY",
+    "secret:ig-id": "wrangler secret put IG_APP_ID",
+    "secret:ig-secret": "wrangler secret put IG_APP_SECRET"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0",
+    "typescript": "^5.6.0"
+  }
+}
