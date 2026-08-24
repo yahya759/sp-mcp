@@ -5,6 +5,7 @@ export interface Env {
   IG_APP_ID: string;
   IG_APP_SECRET: string;
   MCP_BASE_URL: string;
+  WEBHOOK_VERIFY_TOKEN: string;
 }
 
 const CORS_HEADERS = {
@@ -326,7 +327,85 @@ async function publishInstagramPost(
   return { post_id: publishData.id, account: account.ig_username };
 }
 
-// ---------- MCP JSON-RPC endpoint ----------
+// ---------- Instagram Webhooks: استقبال تعليقات جديدة والرد التلقائي ----------
+
+function handleWebhookVerify(url: URL, env: Env): Response {
+  const mode = url.searchParams.get("hub.mode");
+  const token = url.searchParams.get("hub.verify_token");
+  const challenge = url.searchParams.get("hub.challenge");
+
+  if (mode === "subscribe" && token === env.WEBHOOK_VERIFY_TOKEN && challenge) {
+    return new Response(challenge, { status: 200 });
+  }
+  return new Response("Forbidden", { status: 403 });
+}
+
+async function handleWebhookEvent(request: Request, env: Env): Promise<Response> {
+  // نرجع 200 دايماً بسرعة لـ Meta (وإلا بتوقف الاشتراك)، والمعالجة تصير بالخلفية
+  let body: any;
+  try {
+    body = await request.json();
+  } catch {
+    return new Response("ok", { status: 200 });
+  }
+
+  try {
+    const entries = body?.entry ?? [];
+    for (const entry of entries) {
+      const igUserId = entry.id; // معرف حساب إنستقرام صاحب الحدث
+      const changes = entry.changes ?? [];
+
+      for (const change of changes) {
+        if (change.field !== "comments") continue;
+        const value = change.value ?? {};
+        const commentId = value.id;
+        const mediaId = value.media?.id;
+        const commenterUsername = value.from?.username;
+        if (!commentId || !mediaId) continue;
+
+        // لا ترد على تعليقات الحساب نفسه (لتفادي حلقة لا نهائية)
+        if (value.from?.id === igUserId) continue;
+
+        // 1. دور على الحساب صاحب هاد الـ ig_user_id
+        const accounts: any[] = await sbSelect(
+          env,
+          "sp_instagram_accounts",
+          `ig_user_id=eq.${encodeURIComponent(igUserId)}&select=id,access_token`
+        );
+        const account = accounts[0];
+        if (!account) continue;
+
+        // 2. دور على قاعدة رد فعالة لنفس المنشور
+        const rules: any[] = await sbSelect(
+          env,
+          "sp_auto_reply_rules",
+          `instagram_account_id=eq.${encodeURIComponent(account.id)}&post_id=eq.${encodeURIComponent(mediaId)}&enabled=eq.true&select=id,reply_message`
+        );
+        const rule = rules[0];
+        if (!rule) continue;
+
+        // 3. تأكد ما انردينا على هاد التعليق قبل هيك (تفادي تكرار)
+        try {
+          await sbInsert(env, "sp_auto_reply_log", { rule_id: rule.id, comment_id: commentId });
+        } catch {
+          // إذا فشل الإدراج (unique constraint) يعني انردينا عليه قبل هيك، تجاهل
+          continue;
+        }
+
+        // 4. ابعت الرد فعلياً
+        await fetch(`https://graph.instagram.com/v21.0/${commentId}/replies`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: rule.reply_message, access_token: account.access_token }),
+        });
+      }
+    }
+  } catch (err) {
+    console.error("webhook processing error", err);
+  }
+
+  return new Response("ok", { status: 200 });
+}
 
 async function getRecentPosts(env: Env, userId: string, accountId?: string) {
   const accounts: any[] = await getInstagramAccounts(env, userId);
@@ -597,6 +676,13 @@ export default {
       }
       if (url.pathname === "/mcp" && request.method === "POST") {
         return handleMcp(request, env);
+      }
+
+      if (url.pathname === "/webhooks/instagram" && request.method === "GET") {
+        return handleWebhookVerify(url, env);
+      }
+      if (url.pathname === "/webhooks/instagram" && request.method === "POST") {
+        return handleWebhookEvent(request, env);
       }
 
       if (url.pathname === "/" || url.pathname === "/health") {
