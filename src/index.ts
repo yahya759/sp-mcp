@@ -473,7 +473,7 @@ async function pollAndAutoReply(env: Env) {
       const accounts: any[] = await sbSelect(
         env,
         "sp_instagram_accounts",
-        `id=eq.${encodeURIComponent(rule.instagram_account_id)}&select=access_token`
+        `id=eq.${encodeURIComponent(rule.instagram_account_id)}&select=access_token,ig_user_id`
       );
       const account = accounts[0];
       if (!account) {
@@ -483,7 +483,7 @@ async function pollAndAutoReply(env: Env) {
       }
 
       const res = await fetch(
-        `https://graph.instagram.com/v21.0/${rule.post_id}/comments?fields=id,text&access_token=${account.access_token}`
+        `https://graph.instagram.com/v21.0/${rule.post_id}/comments?fields=id,text,from,parent_id&access_token=${account.access_token}`
       );
       const data: any = await res.json();
       detail.comments_api_status = res.status;
@@ -492,10 +492,16 @@ async function pollAndAutoReply(env: Env) {
         report.details.push(detail);
         continue;
       }
-      detail.comments_found = data.data?.length ?? 0;
+
+      // ما نرد إلا على تعليقات أساسية (مش ردود متفرعة) وموجودة من غير حسابنا نفسه
+      const eligibleComments = (data.data ?? []).filter(
+        (c: any) => !c.parent_id && c.from?.id !== account.ig_user_id
+      );
+
+      detail.comments_found = eligibleComments.length;
       detail.replies = [];
 
-      for (const comment of data.data ?? []) {
+      for (const comment of eligibleComments) {
         let alreadyLogged = false;
         try {
           await sbInsert(env, "sp_auto_reply_log", { rule_id: rule.id, comment_id: comment.id });
