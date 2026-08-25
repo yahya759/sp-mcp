@@ -498,6 +498,8 @@ async function pollAndAutoReply(env: Env) {
     console.error("poll auto-reply error", err);
   }
 }
+
+const TOOLS = [
   {
     name: "list_connected_accounts",
     description: "يرجع لائحة حسابات إنستقرام المربوطة بحساب المستخدم الحالي على منصة Sp",
@@ -743,7 +745,7 @@ export default {
     }
   },
 
-  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+  async scheduled(event: any, env: Env, ctx: any) {
     ctx.waitUntil(pollAndAutoReply(env));
   },
 };
