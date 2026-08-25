@@ -793,6 +793,11 @@ export default {
         if (!res.ok) return json({ error: data?.error?.message ?? "فشل الجلب" }, 400);
 
         const all: any[] = data.data ?? [];
+
+        if (url.searchParams.get("raw") === "1") {
+          return json({ my_ig_user_id: account.ig_user_id, comments: all });
+        }
+
         const byId = new Map(all.map((c: any) => [c.id, c]));
 
         // دالة تلاقي أصل الخيط (أول تعليق بالسلسلة، تصعد بالـ parent_id لحد ما توصل للجذر)
