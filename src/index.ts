@@ -765,6 +765,15 @@ export default {
         return json(report);
       }
 
+      if (url.pathname === "/debug-env" && request.method === "GET") {
+        return json({
+          SUPABASE_URL: env.SUPABASE_URL ?? null,
+          SUPABASE_ANON_KEY_length: env.SUPABASE_ANON_KEY?.length ?? 0,
+          SUPABASE_SERVICE_ROLE_KEY_length: env.SUPABASE_SERVICE_ROLE_KEY?.length ?? 0,
+          SUPABASE_SERVICE_ROLE_KEY_present: typeof env.SUPABASE_SERVICE_ROLE_KEY === "string" && env.SUPABASE_SERVICE_ROLE_KEY.length > 0,
+        });
+      }
+
       if (url.pathname === "/" || url.pathname === "/health") {
         return json({ status: "ok", service: "sp-mcp" });
       }
