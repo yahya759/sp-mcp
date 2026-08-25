@@ -455,7 +455,49 @@ async function replyToComment(
   return { reply_id: data.id, account: account.ig_username };
 }
 
-const TOOLS = [
+// ---------- Cron: فحص دوري للردود التلقائية (بديل عن webhooks بما إنه التطبيق لسا Development) ----------
+
+async function pollAndAutoReply(env: Env) {
+  try {
+    const rules: any[] = await sbSelect(
+      env,
+      "sp_auto_reply_rules",
+      `enabled=eq.true&select=id,post_id,reply_message,instagram_account_id`
+    );
+
+    for (const rule of rules) {
+      const accounts: any[] = await sbSelect(
+        env,
+        "sp_instagram_accounts",
+        `id=eq.${encodeURIComponent(rule.instagram_account_id)}&select=access_token`
+      );
+      const account = accounts[0];
+      if (!account) continue;
+
+      const res = await fetch(
+        `https://graph.instagram.com/v21.0/${rule.post_id}/comments?fields=id&access_token=${account.access_token}`
+      );
+      const data: any = await res.json();
+      if (!res.ok || !data.data) continue;
+
+      for (const comment of data.data) {
+        try {
+          await sbInsert(env, "sp_auto_reply_log", { rule_id: rule.id, comment_id: comment.id });
+        } catch {
+          continue; // انردينا عليه قبل هيك
+        }
+
+        await fetch(`https://graph.instagram.com/v21.0/${comment.id}/replies`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: rule.reply_message, access_token: account.access_token }),
+        });
+      }
+    }
+  } catch (err) {
+    console.error("poll auto-reply error", err);
+  }
+}
   {
     name: "list_connected_accounts",
     description: "يرجع لائحة حسابات إنستقرام المربوطة بحساب المستخدم الحالي على منصة Sp",
@@ -685,6 +727,12 @@ export default {
         return handleWebhookEvent(request, env);
       }
 
+      // تشغيل يدوي للفحص الدوري (للاختبار الفوري بدون الانتظار للـ cron)
+      if (url.pathname === "/run-poll" && request.method === "GET") {
+        await pollAndAutoReply(env);
+        return json({ status: "polled" });
+      }
+
       if (url.pathname === "/" || url.pathname === "/health") {
         return json({ status: "ok", service: "sp-mcp" });
       }
@@ -693,5 +741,9 @@ export default {
     } catch (err: any) {
       return json({ error: "internal_error", message: String(err?.message ?? err) }, 500);
     }
+  },
+
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(pollAndAutoReply(env));
   },
 };

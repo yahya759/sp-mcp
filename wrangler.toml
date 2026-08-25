@@ -2,6 +2,11 @@ name = "sp-mcp"
 main = "src/index.ts"
 compatibility_date = "2024-11-01"
 
+# يفحص كل 5 دقايق تعليقات جديدة على منشورات فيها قاعدة رد فعالة، ويرد تلقائياً
+# (بديل عن webhooks بما إنه التطبيق لسا Development وما بيوصله webhooks حقيقية)
+[triggers]
+crons = ["*/5 * * * *"]
+
 # لازم تضيف هاي كـ secrets من CLI (ما تحطها هون بالنص):
 # wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 # wrangler secret put IG_APP_ID
