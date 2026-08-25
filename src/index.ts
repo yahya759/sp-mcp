@@ -458,45 +458,75 @@ async function replyToComment(
 // ---------- Cron: فحص دوري للردود التلقائية (بديل عن webhooks بما إنه التطبيق لسا Development) ----------
 
 async function pollAndAutoReply(env: Env) {
+  const report: any = { rules_found: 0, details: [] };
   try {
     const rules: any[] = await sbSelect(
       env,
       "sp_auto_reply_rules",
       `enabled=eq.true&select=id,post_id,reply_message,instagram_account_id`
     );
+    report.rules_found = rules.length;
 
     for (const rule of rules) {
+      const detail: any = { rule_id: rule.id, post_id: rule.post_id };
+
       const accounts: any[] = await sbSelect(
         env,
         "sp_instagram_accounts",
         `id=eq.${encodeURIComponent(rule.instagram_account_id)}&select=access_token`
       );
       const account = accounts[0];
-      if (!account) continue;
+      if (!account) {
+        detail.error = "account_not_found";
+        report.details.push(detail);
+        continue;
+      }
 
       const res = await fetch(
-        `https://graph.instagram.com/v21.0/${rule.post_id}/comments?fields=id&access_token=${account.access_token}`
+        `https://graph.instagram.com/v21.0/${rule.post_id}/comments?fields=id,text&access_token=${account.access_token}`
       );
       const data: any = await res.json();
-      if (!res.ok || !data.data) continue;
+      detail.comments_api_status = res.status;
+      if (!res.ok) {
+        detail.error = data?.error?.message ?? JSON.stringify(data);
+        report.details.push(detail);
+        continue;
+      }
+      detail.comments_found = data.data?.length ?? 0;
+      detail.replies = [];
 
-      for (const comment of data.data) {
+      for (const comment of data.data ?? []) {
+        let alreadyLogged = false;
         try {
           await sbInsert(env, "sp_auto_reply_log", { rule_id: rule.id, comment_id: comment.id });
         } catch {
-          continue; // انردينا عليه قبل هيك
+          alreadyLogged = true;
         }
 
-        await fetch(`https://graph.instagram.com/v21.0/${comment.id}/replies`, {
+        if (alreadyLogged) {
+          detail.replies.push({ comment_id: comment.id, status: "already_replied_before" });
+          continue;
+        }
+
+        const replyRes = await fetch(`https://graph.instagram.com/v21.0/${comment.id}/replies`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: rule.reply_message, access_token: account.access_token }),
         });
+        const replyData: any = await replyRes.json();
+        detail.replies.push({
+          comment_id: comment.id,
+          status: replyRes.status,
+          result: replyData,
+        });
       }
+
+      report.details.push(detail);
     }
-  } catch (err) {
-    console.error("poll auto-reply error", err);
+  } catch (err: any) {
+    report.fatal_error = String(err?.message ?? err);
   }
+  return report;
 }
 
 const TOOLS = [
@@ -731,8 +761,8 @@ export default {
 
       // تشغيل يدوي للفحص الدوري (للاختبار الفوري بدون الانتظار للـ cron)
       if (url.pathname === "/run-poll" && request.method === "GET") {
-        await pollAndAutoReply(env);
-        return json({ status: "polled" });
+        const report = await pollAndAutoReply(env);
+        return json(report);
       }
 
       if (url.pathname === "/" || url.pathname === "/health") {
