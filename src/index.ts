@@ -771,6 +771,81 @@ export default {
         return json(report);
       }
 
+      if (url.pathname === "/admin-cleanup" && request.method === "GET") {
+        const postId = url.searchParams.get("post_id");
+        const accountId = url.searchParams.get("account_id");
+        if (!postId || !accountId) {
+          return json({ error: "post_id و account_id مطلوبين بالـ query" }, 400);
+        }
+
+        const accounts: any[] = await sbSelect(
+          env,
+          "sp_instagram_accounts",
+          `id=eq.${encodeURIComponent(accountId)}&select=access_token,ig_user_id`
+        );
+        const account = accounts[0];
+        if (!account) return json({ error: "الحساب مش موجود" }, 404);
+
+        const res = await fetch(
+          `https://graph.instagram.com/v21.0/${postId}/comments?fields=id,text,from,timestamp,parent_id&limit=200&access_token=${account.access_token}`
+        );
+        const data: any = await res.json();
+        if (!res.ok) return json({ error: data?.error?.message ?? "فشل الجلب" }, 400);
+
+        const all: any[] = data.data ?? [];
+        const byId = new Map(all.map((c: any) => [c.id, c]));
+
+        // دالة تلاقي أصل الخيط (أول تعليق بالسلسلة، تصعد بالـ parent_id لحد ما توصل للجذر)
+        function findRoot(comment: any): string {
+          let current = comment;
+          const seen = new Set<string>();
+          while (current?.parent_id && byId.has(current.parent_id) && !seen.has(current.id)) {
+            seen.add(current.id);
+            current = byId.get(current.parent_id);
+          }
+          return current?.id ?? comment.id;
+        }
+
+        // جمّع كل ردود حسابنا (from = حسابنا) حسب أصل الخيط يلي تنتمي له
+        const botRepliesByRoot = new Map<string, any[]>();
+        for (const c of all) {
+          if (c.from?.id !== account.ig_user_id) continue;
+          const root = findRoot(c);
+          if (!botRepliesByRoot.has(root)) botRepliesByRoot.set(root, []);
+          botRepliesByRoot.get(root)!.push(c);
+        }
+
+        const deleted: string[] = [];
+        const kept: string[] = [];
+        const errors: any[] = [];
+
+        for (const [, replies] of botRepliesByRoot) {
+          if (replies.length <= 1) continue;
+          replies.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+          kept.push(replies[0].id);
+          for (const extra of replies.slice(1)) {
+            const delRes = await fetch(
+              `https://graph.instagram.com/v21.0/${extra.id}?access_token=${account.access_token}`,
+              { method: "DELETE" }
+            );
+            const delData: any = await delRes.json();
+            if (delRes.ok) {
+              deleted.push(extra.id);
+            } else {
+              errors.push({ id: extra.id, error: delData?.error?.message });
+            }
+          }
+        }
+
+        return json({
+          total_comments_scanned: all.length,
+          duplicate_threads_found: [...botRepliesByRoot.values()].filter((r) => r.length > 1).length,
+          kept,
+          deleted,
+          errors,
+        });
+      }
+
       if (url.pathname === "/debug-env" && request.method === "GET") {
         return json({
           SUPABASE_URL: env.SUPABASE_URL ?? null,
