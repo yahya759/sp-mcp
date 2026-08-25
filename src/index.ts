@@ -363,17 +363,21 @@ async function handleWebhookEvent(request: Request, env: Env): Promise<Response>
         const commenterUsername = value.from?.username;
         if (!commentId || !mediaId) continue;
 
-        // لا ترد على تعليقات الحساب نفسه (لتفادي حلقة لا نهائية)
-        if (value.from?.id === igUserId) continue;
+        // لا نرد على ردود متفرعة (بس على تعليقات أساسية)
+        if (value.parent_id) continue;
 
         // 1. دور على الحساب صاحب هاد الـ ig_user_id
         const accounts: any[] = await sbSelect(
           env,
           "sp_instagram_accounts",
-          `ig_user_id=eq.${encodeURIComponent(igUserId)}&select=id,access_token`
+          `ig_user_id=eq.${encodeURIComponent(igUserId)}&select=id,access_token,ig_username`
         );
         const account = accounts[0];
         if (!account) continue;
+
+        // لا ترد على تعليقات الحساب نفسه (لتفادي حلقة لا نهائية) — بالـ username، لأنه معرف الحساب
+        // المخزّن أحياناً بيختلف عن from.id يلي بيرجعه Meta بحمولة الـ webhook
+        if (commenterUsername && commenterUsername === account.ig_username) continue;
 
         // 2. دور على قاعدة رد فعالة لنفس المنشور
         const rules: any[] = await sbSelect(
@@ -473,7 +477,7 @@ async function pollAndAutoReply(env: Env) {
       const accounts: any[] = await sbSelect(
         env,
         "sp_instagram_accounts",
-        `id=eq.${encodeURIComponent(rule.instagram_account_id)}&select=access_token,ig_user_id`
+        `id=eq.${encodeURIComponent(rule.instagram_account_id)}&select=access_token,ig_user_id,ig_username`
       );
       const account = accounts[0];
       if (!account) {
@@ -495,7 +499,7 @@ async function pollAndAutoReply(env: Env) {
 
       // ما نرد إلا على تعليقات أساسية (مش ردود متفرعة) وموجودة من غير حسابنا نفسه
       const eligibleComments = (data.data ?? []).filter(
-        (c: any) => !c.parent_id && c.from?.id !== account.ig_user_id
+        (c: any) => !c.parent_id && c.from?.username !== account.ig_username
       );
 
       detail.comments_found = eligibleComments.length;
@@ -781,7 +785,7 @@ export default {
         const accounts: any[] = await sbSelect(
           env,
           "sp_instagram_accounts",
-          `id=eq.${encodeURIComponent(accountId)}&select=access_token,ig_user_id`
+          `id=eq.${encodeURIComponent(accountId)}&select=access_token,ig_user_id,ig_username`
         );
         const account = accounts[0];
         if (!account) return json({ error: "الحساب مش موجود" }, 404);
@@ -814,7 +818,7 @@ export default {
         // جمّع كل ردود حسابنا (from = حسابنا) حسب أصل الخيط يلي تنتمي له
         const botRepliesByRoot = new Map<string, any[]>();
         for (const c of all) {
-          if (c.from?.id !== account.ig_user_id) continue;
+          if (c.from?.username !== account.ig_username) continue;
           const root = findRoot(c);
           if (!botRepliesByRoot.has(root)) botRepliesByRoot.set(root, []);
           botRepliesByRoot.get(root)!.push(c);
